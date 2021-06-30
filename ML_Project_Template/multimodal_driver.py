@@ -8,11 +8,15 @@ import pickle
 import sys
 import numpy as np
 from typing import *
+import pandas as pd
 
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import precision_recall_fscore_support
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
+from sklearn import preprocessing
+
 
 import wandb
 import torch
@@ -30,7 +34,7 @@ from bert import MAG_BertForSequenceClassification
 from xlnet import MAG_XLNetForSequenceClassification
 
 from argparse_utils import str2bool, seed
-from global_configs import ACOUSTIC_DIM, VISUAL_DIM, DEVICE
+from global_configs import ACOUSTIC_DIM, DATA_DIR, DEV_SPLIT, TEST_SPLIT, VISUAL_DIM, DEVICE
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str,
@@ -217,47 +221,67 @@ def get_tokenizer(model):
             )
         )
 
+def get_file_id_from_number(tensor_values, split_name):
+    '''
+    we converted file_id to a number using LabelEncoder()
+    now, we want to get back to that file_id
+    tensor_value: list of numbers that replaced the file_id
+    split_name: train, test, dev
 
-def get_appropriate_dataset(data):
+    returns a list of strings (file_ids)
+    '''
+    le = preprocessing.LabelEncoder()
+    le.classes_ = np.load('file_id_to_numbers_%s.npy'%(split_name), allow_pickle=True)
+    file_ids = le.inverse_transform(tensor_values)
+    return file_ids
 
-    tokenizer = get_tokenizer(args.model)
+def get_appropriate_dataset(data, split_name):
+    '''
+    data: pandas dataframe
+    split_name: train, test, dev
 
-    features = convert_to_features(data, args.max_seq_length, tokenizer)
-    all_input_ids = torch.tensor(
-        [f.input_ids for f in features], dtype=torch.long)
-    all_input_mask = torch.tensor(
-        [f.input_mask for f in features], dtype=torch.long)
-    all_segment_ids = torch.tensor(
-        [f.segment_ids for f in features], dtype=torch.long)
-    all_visual = torch.tensor([f.visual for f in features], dtype=torch.float)
-    all_acoustic = torch.tensor(
-        [f.acoustic for f in features], dtype=torch.float)
-    all_label_ids = torch.tensor(
-        [f.label_id for f in features], dtype=torch.float)
+    returns a tensor dataset
+    '''
+    #Convert file id strings to encoded numbers and return as tensors
+    le = preprocessing.LabelEncoder()
+    le.fit(data["id1"])
+    np.save('file_id_to_numbers_%s.npy'%(split_name), le.classes_)
+    all_id1 = torch.as_tensor(le.transform(data["id1"]))
+    all_id2 = torch.as_tensor(le.transform(data["id2"]))
+
+    all_features1 = torch.tensor(data["features1"], dtype=torch.float)
+    all_features2 = torch.tensor(data["features2"], dtype=torch.float)
+    all_label = torch.tensor(data["label"], dtype=torch.float)
+
+    #To get back to ids
+    #file_ids = get_file_id_from_number(all_id1, "train")
 
     dataset = TensorDataset(
-        all_input_ids,
-        all_visual,
-        all_acoustic,
-        all_input_mask,
-        all_segment_ids,
-        all_label_ids,
+        all_id1,
+        all_id2,
+        all_features1,
+        all_features2,
+        all_label
     )
     return dataset
 
 
 def set_up_data_loader():
-    with open(f"datasets/{args.dataset}.pkl", "rb") as handle:
+    with open(os.path.join(DATA_DIR,"task2_ranking_dataset.pkl"), "rb") as handle:
         data = pickle.load(handle)
 
-    train_data = data["train"]
-    dev_data = data["dev"]
-    test_data = data["test"]
+    train, dev, test = np.split(data.sample(frac=1, random_state=42), [int((1.0 - (TEST_SPLIT+DEV_SPLIT))*len(data)), int((1.0 - TEST_SPLIT)*len(data))])
+    
+    train = train.reset_index()
+    test = test.reset_index()
+    dev = dev.reset_index()
 
-    train_dataset = get_appropriate_dataset(train_data)
-    dev_dataset = get_appropriate_dataset(dev_data)
-    test_dataset = get_appropriate_dataset(test_data)
-
+    train_dataset = get_appropriate_dataset(train, "train")
+    dev_dataset = get_appropriate_dataset(dev, "dev")
+    test_dataset = get_appropriate_dataset(test, "test")
+    
+    #print(len(train_dataset), len(test_dataset), len(dev_dataset))
+    
     num_train_optimization_steps = (
         int(
             len(train_dataset) / args.train_batch_size /

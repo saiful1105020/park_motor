@@ -18,3 +18,8 @@ TEXT_DIM = 768
 # TEXT_DIM = 768
 
 XLNET_INJECTION_INDEX = 1
+
+#Files
+DATA_DIR = "E:/Saiful/park_motor/data"
+TEST_SPLIT = 0.05
+DEV_SPLIT = 0.05

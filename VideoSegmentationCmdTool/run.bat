@@ -1,0 +1,2 @@
+VideoSegmentationCmdTool.exe -m msra_model_6_200a.slim
+pause

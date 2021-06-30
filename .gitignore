@@ -22,6 +22,7 @@ Tools/
 *.pb
 *.pickle
 *.npy
+*.avi
 !test_*
 
 # Distribution / packaging

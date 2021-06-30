@@ -535,6 +535,9 @@ def main():
         num_train_optimization_steps,
     ) = set_up_data_loader()
 
+    assert False
+    #test_data_loader()
+
     model, optimizer, scheduler = prep_for_training(
         num_train_optimization_steps)
 

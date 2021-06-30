@@ -6,6 +6,22 @@ __pycache__/
 # C extensions
 *.so
 
+#MATLAB files
+*.mat
+
+#Wandb
+wandb/
+Tools/
+
+# ignore data by default
+*.csv
+*.wav
+*.mp4
+*.webm
+*.bmp
+*.pb
+!test_*
+
 # Distribution / packaging
 .Python
 build/

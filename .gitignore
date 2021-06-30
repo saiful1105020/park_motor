@@ -21,6 +21,7 @@ Tools/
 *.bmp
 *.pb
 *.pickle
+*.npy
 !test_*
 
 # Distribution / packaging

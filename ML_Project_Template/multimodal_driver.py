@@ -38,10 +38,10 @@ from global_configs import DATA_DIR, DEV_SPLIT, TEST_SPLIT, DEVICE
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str,
                     choices=["saloni-only"], default="saloni-only")
-parser.add_argument("--train_batch_size", type=int, default=48)
+parser.add_argument("--train_batch_size", type=int, default=512)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
-parser.add_argument("--n_epochs", type=int, default=40)
+parser.add_argument("--n_epochs", type=int, default=100)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
 #Number of output neurons in hidden layer for the ff-siamese model
 parser.add_argument("--ff_hidden_dim", type=int, default=64)
@@ -54,7 +54,7 @@ parser.add_argument(
     choices=["ff-siamese"],
     default="ff-siamese",
 )
-parser.add_argument("--learning_rate", type=float, default=1e-5)
+parser.add_argument("--learning_rate", type=float, default=1e-3)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
 parser.add_argument("--seed", type=seed, default="random")
 
@@ -64,19 +64,6 @@ args = parser.parse_args()
 
 def return_unk():
     return 0
-
-
-class InputFeatures(object):
-    """A single set of features of data."""
-
-    def __init__(self, input_ids, visual, acoustic, input_mask, segment_ids, label_id):
-        self.input_ids = input_ids
-        self.visual = visual
-        self.acoustic = acoustic
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
-        self.label_id = label_id
-
 
 def get_file_id_from_number(tensor_values, split_name):
     '''
@@ -112,7 +99,7 @@ def get_appropriate_dataset(data, split_name):
 
     #To get back to ids
     #file_ids = get_file_id_from_number(all_id1, "train")
-
+    
     dataset = TensorDataset(
         all_id1,
         all_id2,
@@ -120,6 +107,12 @@ def get_appropriate_dataset(data, split_name):
         all_features2,
         all_label
     )
+
+    #print(dataset.tensors[0])
+    #print(dataset.tensors[0].size(0))
+    #print(dataset.__len__())
+    #print(dataset.__getitem__(0))
+
     return dataset
 
 
@@ -210,27 +203,23 @@ def prep_for_training(num_train_optimization_steps: int):
 
     return model, optimizer, scheduler
 
-
+#Ongoing
 def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, scheduler):
+    #Model working on training mode
     model.train()
     tr_loss = 0
-    nb_tr_examples, nb_tr_steps = 0, 0
+    num_tr_examples, num_tr_steps = 0, 0
     for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
         batch = tuple(t.to(DEVICE) for t in batch)
-        input_ids, visual, acoustic, input_mask, segment_ids, label_ids = batch
-        visual = torch.squeeze(visual, 1)
-        acoustic = torch.squeeze(acoustic, 1)
+        ids1, ids2, features1, features2, labels = batch
+        
         outputs = model(
-            input_ids,
-            visual,
-            acoustic,
-            token_type_ids=segment_ids,
-            attention_mask=input_mask,
-            labels=None,
+            features1,
+            features2
         )
-        logits = outputs[0]
-        loss_fct = MSELoss()
-        loss = loss_fct(logits.view(-1), label_ids.view(-1))
+        
+        loss_function = MSELoss()
+        loss = loss_function(outputs, labels)
 
         if args.gradient_accumulation_step > 1:
             loss = loss / args.gradient_accumulation_step
@@ -238,14 +227,14 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
         loss.backward()
 
         tr_loss += loss.item()
-        nb_tr_steps += 1
+        num_tr_steps += 1
 
         if (step + 1) % args.gradient_accumulation_step == 0:
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
 
-    return tr_loss / nb_tr_steps
+    return tr_loss / num_tr_steps
 
 
 def eval_epoch(model: nn.Module, dev_dataloader: DataLoader, optimizer):
@@ -353,8 +342,18 @@ def train(
 
     for epoch_i in range(int(args.n_epochs)):
         train_loss = train_epoch(model, train_dataloader, optimizer, scheduler)
+        print(
+            "epoch:{}, train_loss:{}".format(epoch_i, train_loss)
+        )
+        wandb.log(
+            (
+                {
+                    "train_loss": train_loss
+                }
+            )
+        )
+        continue
         valid_loss = eval_epoch(model, validation_dataloader, optimizer)
-        assert False
         test_acc, test_mae, test_corr, test_f_score = test_score_model(
             model, test_data_loader
         )

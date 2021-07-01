@@ -28,33 +28,34 @@ from tqdm import tqdm, trange
 from torch.nn import CrossEntropyLoss, L1Loss, MSELoss
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef
-from transformers import BertTokenizer, XLNetTokenizer, get_linear_schedule_with_warmup
-from transformers.optimization import AdamW
-from bert import MAG_BertForSequenceClassification
-from xlnet import MAG_XLNetForSequenceClassification
+from ranking_model import FeedForwardSiamese
+from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 
 from argparse_utils import str2bool, seed
-from global_configs import ACOUSTIC_DIM, DATA_DIR, DEV_SPLIT, TEST_SPLIT, VISUAL_DIM, DEVICE
+from global_configs import DATA_DIR, DEV_SPLIT, TEST_SPLIT, DEVICE
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str,
-                    choices=["mosi", "mosei"], default="mosi")
-parser.add_argument("--max_seq_length", type=int, default=50)
+                    choices=["saloni-only"], default="saloni-only")
 parser.add_argument("--train_batch_size", type=int, default=48)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
 parser.add_argument("--n_epochs", type=int, default=40)
-parser.add_argument("--beta_shift", type=float, default=1.0)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
+#Number of output neurons in hidden layer for the ff-siamese model
+parser.add_argument("--ff_hidden_dim", type=int, default=64)
+parser.add_argument("--scheduler", type=str, choices=["step-lr", "reduce-on-plateau"], default="step-lr")
+parser.add_argument("--scheduler_step_size", type=int, default=1)
+parser.add_argument("--scheduler_factor", type=float, default=0.95)
 parser.add_argument(
     "--model",
     type=str,
-    choices=["bert-base-uncased", "xlnet-base-cased"],
-    default="bert-base-uncased",
+    choices=["ff-siamese"],
+    default="ff-siamese",
 )
 parser.add_argument("--learning_rate", type=float, default=1e-5)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
-parser.add_argument("--warmup_proportion", type=float, default=0.1)
 parser.add_argument("--seed", type=seed, default="random")
 
 
@@ -76,150 +77,6 @@ class InputFeatures(object):
         self.segment_ids = segment_ids
         self.label_id = label_id
 
-
-class MultimodalConfig(object):
-    def __init__(self, beta_shift, dropout_prob):
-        self.beta_shift = beta_shift
-        self.dropout_prob = dropout_prob
-
-
-def convert_to_features(examples, max_seq_length, tokenizer):
-    features = []
-
-    for (ex_index, example) in enumerate(examples):
-
-        (words, visual, acoustic), label_id, segment = example
-
-        tokens, inversions = [], []
-        for idx, word in enumerate(words):
-            tokenized = tokenizer.tokenize(word)
-            tokens.extend(tokenized)
-            inversions.extend([idx] * len(tokenized))
-
-        # Check inversion
-        assert len(tokens) == len(inversions)
-
-        aligned_visual = []
-        aligned_audio = []
-
-        for inv_idx in inversions:
-            aligned_visual.append(visual[inv_idx, :])
-            aligned_audio.append(acoustic[inv_idx, :])
-
-        visual = np.array(aligned_visual)
-        acoustic = np.array(aligned_audio)
-
-        # Truncate input if necessary
-        if len(tokens) > max_seq_length - 2:
-            tokens = tokens[: max_seq_length - 2]
-            acoustic = acoustic[: max_seq_length - 2]
-            visual = visual[: max_seq_length - 2]
-
-        if args.model == "bert-base-uncased":
-            prepare_input = prepare_bert_input
-        elif args.model == "xlnet-base-cased":
-            prepare_input = prepare_xlnet_input
-
-        input_ids, visual, acoustic, input_mask, segment_ids = prepare_input(
-            tokens, visual, acoustic, tokenizer
-        )
-
-        # Check input length
-        assert len(input_ids) == args.max_seq_length
-        assert len(input_mask) == args.max_seq_length
-        assert len(segment_ids) == args.max_seq_length
-        assert acoustic.shape[0] == args.max_seq_length
-        assert visual.shape[0] == args.max_seq_length
-
-        features.append(
-            InputFeatures(
-                input_ids=input_ids,
-                input_mask=input_mask,
-                segment_ids=segment_ids,
-                visual=visual,
-                acoustic=acoustic,
-                label_id=label_id,
-            )
-        )
-    return features
-
-
-def prepare_bert_input(tokens, visual, acoustic, tokenizer):
-    CLS = tokenizer.cls_token
-    SEP = tokenizer.sep_token
-    tokens = [CLS] + tokens + [SEP]
-
-    # Pad zero vectors for acoustic / visual vectors to account for [CLS] / [SEP] tokens
-    acoustic_zero = np.zeros((1, ACOUSTIC_DIM))
-    acoustic = np.concatenate((acoustic_zero, acoustic, acoustic_zero))
-    visual_zero = np.zeros((1, VISUAL_DIM))
-    visual = np.concatenate((visual_zero, visual, visual_zero))
-
-    input_ids = tokenizer.convert_tokens_to_ids(tokens)
-    segment_ids = [0] * len(input_ids)
-    input_mask = [1] * len(input_ids)
-
-    pad_length = args.max_seq_length - len(input_ids)
-
-    acoustic_padding = np.zeros((pad_length, ACOUSTIC_DIM))
-    acoustic = np.concatenate((acoustic, acoustic_padding))
-
-    visual_padding = np.zeros((pad_length, VISUAL_DIM))
-    visual = np.concatenate((visual, visual_padding))
-
-    padding = [0] * pad_length
-
-    # Pad inputs
-    input_ids += padding
-    input_mask += padding
-    segment_ids += padding
-
-    return input_ids, visual, acoustic, input_mask, segment_ids
-
-
-def prepare_xlnet_input(tokens, visual, acoustic, tokenizer):
-    CLS = tokenizer.cls_token
-    SEP = tokenizer.sep_token
-    PAD_ID = tokenizer.pad_token_id
-
-    # PAD special tokens
-    tokens = tokens + [SEP] + [CLS]
-    audio_zero = np.zeros((1, ACOUSTIC_DIM))
-    acoustic = np.concatenate((acoustic, audio_zero, audio_zero))
-    visual_zero = np.zeros((1, VISUAL_DIM))
-    visual = np.concatenate((visual, visual_zero, visual_zero))
-
-    input_ids = tokenizer.convert_tokens_to_ids(tokens)
-    input_mask = [1] * len(input_ids)
-    segment_ids = [0] * (len(tokens) - 1) + [2]
-
-    pad_length = (args.max_seq_length - len(segment_ids))
-
-    # then zero pad the visual and acoustic
-    audio_padding = np.zeros((pad_length, ACOUSTIC_DIM))
-    acoustic = np.concatenate((audio_padding, acoustic))
-
-    video_padding = np.zeros((pad_length, VISUAL_DIM))
-    visual = np.concatenate((video_padding, visual))
-
-    input_ids = [PAD_ID] * pad_length + input_ids
-    input_mask = [0] * pad_length + input_mask
-    segment_ids = [3] * pad_length + segment_ids
-
-    return input_ids, visual, acoustic, input_mask, segment_ids
-
-
-def get_tokenizer(model):
-    if model == "bert-base-uncased":
-        return BertTokenizer.from_pretrained(model)
-    elif model == "xlnet-base-cased":
-        return XLNetTokenizer.from_pretrained(model)
-    else:
-        raise ValueError(
-            "Expected 'bert-base-uncased' or 'xlnet-base-cased, but received {}".format(
-                model
-            )
-        )
 
 def get_file_id_from_number(tensor_values, split_name):
     '''
@@ -267,7 +124,12 @@ def get_appropriate_dataset(data, split_name):
 
 
 def set_up_data_loader():
-    with open(os.path.join(DATA_DIR,"task2_ranking_dataset.pkl"), "rb") as handle:
+    #Update filename
+    filename = ""
+    if args.dataset=="saloni-only":
+        filename = os.path.join(DATA_DIR,"task2_ranking_dataset.pkl")
+
+    with open(filename, "rb") as handle:
         data = pickle.load(handle)
 
     train, dev, test = np.split(data.sample(frac=1, random_state=42), [int((1.0 - (TEST_SPLIT+DEV_SPLIT))*len(data)), int((1.0 - TEST_SPLIT)*len(data))])
@@ -331,47 +193,21 @@ def set_random_seed(seed: int):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-
 def prep_for_training(num_train_optimization_steps: int):
-    multimodal_config = MultimodalConfig(
-        beta_shift=args.beta_shift, dropout_prob=args.dropout_prob
-    )
 
-    if args.model == "bert-base-uncased":
-        model = MAG_BertForSequenceClassification.from_pretrained(
-            args.model, multimodal_config=multimodal_config, num_labels=1,
-        )
-    elif args.model == "xlnet-base-cased":
-        model = MAG_XLNetForSequenceClassification.from_pretrained(
-            args.model, multimodal_config=multimodal_config, num_labels=1
-        )
+    if args.model == "ff-siamese":
+        model = FeedForwardSiamese(args)
 
     model.to(DEVICE)
 
-    # Prepare optimizer
-    param_optimizer = list(model.named_parameters())
-    no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [
-                p for n, p in param_optimizer if not any(nd in n for nd in no_decay)
-            ],
-            "weight_decay": 0.01,
-        },
-        {
-            "params": [
-                p for n, p in param_optimizer if any(nd in n for nd in no_decay)
-            ],
-            "weight_decay": 0.0,
-        },
-    ]
+    optimizer = Adam(model.parameters(), lr=args.learning_rate)
+    
+    scheduler = None
+    if args.scheduler == "step-lr":
+        scheduler = StepLR(optimizer, step_size=args.scheduler_step_size, gamma=args.scheduler_factor)
+    elif args.scheduler == "reduce-on-plateau":
+        scheduler = ReduceLROnPlateau(optimizer, factor=args.scheduler_factor)
 
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_train_optimization_steps,
-        num_training_steps=args.warmup_proportion * num_train_optimization_steps,
-    )
     return model, optimizer, scheduler
 
 
@@ -518,6 +354,7 @@ def train(
     for epoch_i in range(int(args.n_epochs)):
         train_loss = train_epoch(model, train_dataloader, optimizer, scheduler)
         valid_loss = eval_epoch(model, validation_dataloader, optimizer)
+        assert False
         test_acc, test_mae, test_corr, test_f_score = test_score_model(
             model, test_data_loader
         )
@@ -558,9 +395,6 @@ def main():
         test_data_loader,
         num_train_optimization_steps,
     ) = set_up_data_loader()
-
-    assert False
-    #test_data_loader()
 
     model, optimizer, scheduler = prep_for_training(
         num_train_optimization_steps)

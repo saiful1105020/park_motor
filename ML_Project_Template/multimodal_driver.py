@@ -41,20 +41,20 @@ parser.add_argument("--dataset", type=str,
 parser.add_argument("--train_batch_size", type=int, default=512)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
-parser.add_argument("--n_epochs", type=int, default=100)
+parser.add_argument("--n_epochs", type=int, default=10)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
 #Number of output neurons in hidden layer for the ff-siamese model
 parser.add_argument("--ff_hidden_dim", type=int, default=64)
 parser.add_argument("--scheduler", type=str, choices=["step-lr", "reduce-on-plateau"], default="step-lr")
 parser.add_argument("--scheduler_step_size", type=int, default=1)
-parser.add_argument("--scheduler_factor", type=float, default=0.95)
+parser.add_argument("--scheduler_factor", type=float, default=0.60)
 parser.add_argument(
     "--model",
     type=str,
     choices=["ff-siamese"],
     default="ff-siamese",
 )
-parser.add_argument("--learning_rate", type=float, default=1e-3)
+parser.add_argument("--learning_rate", type=float, default=1e-4)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
 parser.add_argument("--seed", type=seed, default="random")
 
@@ -231,7 +231,11 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
 
         if (step + 1) % args.gradient_accumulation_step == 0:
             optimizer.step()
-            scheduler.step()
+
+            if args.scheduler=='step-lr':
+                scheduler.step()
+            elif args.scheduler=='reduce-on-plateau':
+                scheduler.step(tr_loss)
             optimizer.zero_grad()
 
     return tr_loss / num_tr_steps
@@ -240,34 +244,27 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
 def eval_epoch(model: nn.Module, dev_dataloader: DataLoader, optimizer):
     model.eval()
     dev_loss = 0
-    nb_dev_examples, nb_dev_steps = 0, 0
+    num_dev_examples, num_dev_steps = 0, 0
     with torch.no_grad():
         for step, batch in enumerate(tqdm(dev_dataloader, desc="Iteration")):
             batch = tuple(t.to(DEVICE) for t in batch)
+            ids1, ids2, features1, features2, labels = batch
 
-            input_ids, visual, acoustic, input_mask, segment_ids, label_ids = batch
-            visual = torch.squeeze(visual, 1)
-            acoustic = torch.squeeze(acoustic, 1)
             outputs = model(
-                input_ids,
-                visual,
-                acoustic,
-                token_type_ids=segment_ids,
-                attention_mask=input_mask,
-                labels=None,
+            features1,
+            features2
             )
-            logits = outputs[0]
-
-            loss_fct = MSELoss()
-            loss = loss_fct(logits.view(-1), label_ids.view(-1))
+            
+            loss_function = MSELoss()
+            loss = loss_function(outputs, labels)
 
             if args.gradient_accumulation_step > 1:
                 loss = loss / args.gradient_accumulation_step
 
             dev_loss += loss.item()
-            nb_dev_steps += 1
+            num_dev_steps += 1
 
-    return dev_loss / nb_dev_steps
+    return dev_loss / num_dev_steps
 
 
 def test_epoch(model: nn.Module, test_dataloader: DataLoader):
@@ -278,28 +275,20 @@ def test_epoch(model: nn.Module, test_dataloader: DataLoader):
     with torch.no_grad():
         for batch in tqdm(test_dataloader):
             batch = tuple(t.to(DEVICE) for t in batch)
+            ids1, ids2, features1, features2, label_ids = batch
 
-            input_ids, visual, acoustic, input_mask, segment_ids, label_ids = batch
-            visual = torch.squeeze(visual, 1)
-            acoustic = torch.squeeze(acoustic, 1)
             outputs = model(
-                input_ids,
-                visual,
-                acoustic,
-                token_type_ids=segment_ids,
-                attention_mask=input_mask,
-                labels=None,
+            features1,
+            features2
             )
 
-            logits = outputs[0]
-
-            logits = logits.detach().cpu().numpy()
+            outputs = outputs.detach().cpu().numpy()
             label_ids = label_ids.detach().cpu().numpy()
 
-            logits = np.squeeze(logits).tolist()
+            outputs = np.squeeze(outputs).tolist()
             label_ids = np.squeeze(label_ids).tolist()
 
-            preds.extend(logits)
+            preds.extend(outputs)
             labels.extend(label_ids)
 
         preds = np.array(preds)
@@ -311,22 +300,28 @@ def test_epoch(model: nn.Module, test_dataloader: DataLoader):
 def test_score_model(model: nn.Module, test_dataloader: DataLoader, use_zero=False):
 
     preds, y_test = test_epoch(model, test_dataloader)
-    non_zeros = np.array(
-        [i for i, e in enumerate(y_test) if e != 0 or use_zero])
+    
+    n = len(preds)
+    for i in range(0,n):
+        print(preds[i], y_test[i])
 
-    preds = preds[non_zeros]
-    y_test = y_test[non_zeros]
+    #non_zeros = np.array(
+    #    [i for i, e in enumerate(y_test) if e != 0 or use_zero])
+
+    #preds = preds[non_zeros]
+    #y_test = y_test[non_zeros]
 
     mae = np.mean(np.absolute(preds - y_test))
     corr = np.corrcoef(preds, y_test)[0][1]
 
-    preds = preds >= 0
-    y_test = y_test >= 0
+    #preds = preds >= 0
+    #y_test = y_test >= 0
 
-    f_score = f1_score(y_test, preds, average="weighted")
-    acc = accuracy_score(y_test, preds)
+    #f_score = f1_score(y_test, preds, average="weighted")
+    #acc = accuracy_score(y_test, preds)
 
-    return acc, mae, corr, f_score
+    #return acc, mae, corr, f_score
+    return mae, corr
 
 
 def train(
@@ -338,53 +333,40 @@ def train(
     scheduler,
 ):
     valid_losses = []
-    test_accuracies = []
+    test_maes = []
 
     for epoch_i in range(int(args.n_epochs)):
         train_loss = train_epoch(model, train_dataloader, optimizer, scheduler)
-        print(
-            "epoch:{}, train_loss:{}".format(epoch_i, train_loss)
-        )
-        wandb.log(
-            (
-                {
-                    "train_loss": train_loss
-                }
-            )
-        )
-        continue
         valid_loss = eval_epoch(model, validation_dataloader, optimizer)
-        test_acc, test_mae, test_corr, test_f_score = test_score_model(
+        test_mae, test_corr = test_score_model(
             model, test_data_loader
         )
 
         print(
-            "epoch:{}, train_loss:{}, valid_loss:{}, test_acc:{}".format(
-                epoch_i, train_loss, valid_loss, test_acc
+            "epoch:{}, train_loss:{}, valid_loss:{}, test_mae:{}".format(
+                epoch_i, train_loss, valid_loss, test_mae
             )
         )
 
         valid_losses.append(valid_loss)
-        test_accuracies.append(test_acc)
+        test_maes.append(test_mae)
 
         wandb.log(
             (
                 {
                     "train_loss": train_loss,
                     "valid_loss": valid_loss,
-                    "test_acc": test_acc,
                     "test_mae": test_mae,
                     "test_corr": test_corr,
-                    "test_f_score": test_f_score,
                     "best_valid_loss": min(valid_losses),
-                    "best_test_acc": max(test_accuracies),
+                    "best_test_mae": max(test_maes),
                 }
             )
         )
 
 
 def main():
-    wandb.init(project="MAG")
+    wandb.init(project="finger_tap_dev")
     wandb.config.update(args)
     set_random_seed(args.seed)
 

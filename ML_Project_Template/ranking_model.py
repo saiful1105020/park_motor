@@ -50,8 +50,8 @@ class FeedForwardSiamese(torch.nn.Module):
         y_pred = self.sigmoid(x1l2-x2l2)
         '''
         
-        x1 = self.ff2(x1)
-        x2 = self.ff2(x2)
+        x1 = self.ff1(x1)
+        x2 = self.ff1(x2)
 
-        y_pred = self.sigmoid(x1-x2)
-        return y_pred
+        #y_pred = self.sigmoid(x1-x2)
+        return x1, x2

@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Tenso
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
-from torch.nn import CrossEntropyLoss, L1Loss, MSELoss, BCELoss
+from torch.nn import CrossEntropyLoss, L1Loss, MSELoss, BCELoss, MarginRankingLoss
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef
 from ranking_model import FeedForwardSiamese
@@ -38,23 +38,24 @@ from global_configs import DATA_DIR, DEV_SPLIT, TEST_SPLIT, DEVICE
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str,
                     choices=["saloni-only"], default="saloni-only")
-parser.add_argument("--train_batch_size", type=int, default=512)
+parser.add_argument("--train_batch_size", type=int, default=64)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
 parser.add_argument("--n_epochs", type=int, default=50)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
+parser.add_argument("--margin", type=float, default=0.3)
 #Number of output neurons in hidden layer for the ff-siamese model
-parser.add_argument("--ff_hidden_dim", type=int, default=512)
+parser.add_argument("--ff_hidden_dim", type=int, default=64)
 parser.add_argument("--scheduler", type=str, choices=["step-lr", "reduce-on-plateau"], default="step-lr")
 parser.add_argument("--scheduler_step_size", type=int, default=1)
-parser.add_argument("--scheduler_factor", type=float, default=0.60)
+parser.add_argument("--scheduler_factor", type=float, default=0.80)
 parser.add_argument(
     "--model",
     type=str,
     choices=["ff-siamese"],
     default="ff-siamese",
 )
-parser.add_argument("--learning_rate", type=float, default=0.0001)
+parser.add_argument("--learning_rate", type=float, default=0.00001)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
 parser.add_argument("--seed", type=seed, default="random")
 
@@ -88,6 +89,10 @@ def get_appropriate_dataset(data, split_name):
     '''
     #Drop 0.5 labels
     #data = data[data["label"]!=0.5]
+
+    #Redefine labels
+    #x1<x2: label 0->-1; x1=x2: label 0.5->0; x1>x2: label 1->1
+    data['label'] = -1.0 + 2.0*data['label']
 
 
     #Convert file id strings to encoded numbers and return as tensors
@@ -213,6 +218,35 @@ def prep_for_training(num_train_optimization_steps: int):
 
     return model, optimizer, scheduler
 
+def rankingLoss(y1_preds, y2_preds, labels):
+    '''
+    e = (y==0) ? max(0, |y1_pred - y2_pred| - args.margin) : max(0, -label(y1_pred - y2_pred)+args.margin)
+    returns mean error
+    '''
+    outputs = y1_preds - y2_preds
+    zero_indices = torch.where(labels==0.0)
+    non_zero_indices = torch.where(labels!=0.0)
+
+    #outputs_non_zero = outputs[non_zero_indices]
+    labels_non_zero = labels[non_zero_indices]
+    y1_preds_non_zero = y1_preds[non_zero_indices]
+    y2_preds_non_zero = y2_preds[non_zero_indices]
+
+    outputs_zero = outputs[zero_indices]
+    labels_zero = labels[zero_indices]
+
+    #NaN issue -- fix it
+    loss_function = MarginRankingLoss(margin=args.margin)
+    L1 = loss_function(y1_preds_non_zero, y2_preds_non_zero, labels_non_zero)*len(labels_non_zero)
+    #print("Training Loss: \n")
+    #print(L1)
+    L2 = torch.sum(torch.maximum(torch.abs(outputs_zero)-args.margin, labels_zero))
+    #print(L2)
+    L = (L1+L2)/len(labels)
+    #print(L)
+    #print("--"*10)
+    return L
+
 #Ongoing
 def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, scheduler):
     #Model working on training mode
@@ -223,13 +257,15 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
         batch = tuple(t.to(DEVICE) for t in batch)
         ids1, ids2, features1, features2, labels = batch
         
-        outputs = model(
+        y1_preds, y2_preds = model(
             features1,
             features2
         )
         
-        loss_function = MSELoss()
-        loss = loss_function(outputs.flatten(), labels.flatten())
+        #Compute Loss
+        loss = rankingLoss(y1_preds, y2_preds, labels)
+        #loss_function = MSELoss()
+        #loss = loss_function(outputs.flatten(), labels.flatten())
 
         if args.gradient_accumulation_step > 1:
             loss = loss / args.gradient_accumulation_step
@@ -260,13 +296,16 @@ def eval_epoch(model: nn.Module, dev_dataloader: DataLoader, optimizer):
             batch = tuple(t.to(DEVICE) for t in batch)
             ids1, ids2, features1, features2, labels = batch
 
-            outputs = model(
+            y1_preds, y2_preds = model(
             features1,
             features2
             )
-            
-            loss_function = MSELoss()
-            loss = loss_function(outputs.flatten(), labels.flatten())
+        
+            #Compute Loss
+            loss = rankingLoss(y1_preds, y2_preds, labels)
+            #loss_function = MSELoss()
+            #loss = loss_function(outputs.flatten(), labels.flatten())
+
 
             if args.gradient_accumulation_step > 1:
                 loss = loss / args.gradient_accumulation_step
@@ -287,10 +326,16 @@ def test_epoch(model: nn.Module, test_dataloader: DataLoader):
             batch = tuple(t.to(DEVICE) for t in batch)
             ids1, ids2, features1, features2, label_ids = batch
 
-            outputs = model(
+            y1_preds, y2_preds = model(
             features1,
             features2
             )
+
+            y_preds = y1_preds - y2_preds
+            outputs = y_preds
+            outputs[torch.where(torch.abs(y_preds)<args.margin)] = 0.0
+            outputs[torch.where(y_preds>args.margin)] = 1.0
+            outputs[torch.where(y_preds<args.margin)] = -1.0
 
             outputs = outputs.detach().cpu().numpy()
             label_ids = label_ids.detach().cpu().numpy()
@@ -393,12 +438,12 @@ def train(
             )
         )
 
-        show_predictions(model, test_data_loader)
-        return
+    show_predictions(model, test_data_loader)
+    return
 
 
 def main():
-    wandb.init(project="finger_tap_dev")
+    wandb.init(project="finger_tap_dev_v2")
     wandb.config.update(args)
     set_random_seed(args.seed)
 

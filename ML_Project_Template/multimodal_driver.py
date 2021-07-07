@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Tenso
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
-from torch.nn import CrossEntropyLoss, L1Loss, MSELoss
+from torch.nn import CrossEntropyLoss, L1Loss, MSELoss, BCELoss
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef
 from ranking_model import FeedForwardSiamese
@@ -41,10 +41,10 @@ parser.add_argument("--dataset", type=str,
 parser.add_argument("--train_batch_size", type=int, default=512)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
-parser.add_argument("--n_epochs", type=int, default=10)
+parser.add_argument("--n_epochs", type=int, default=50)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
 #Number of output neurons in hidden layer for the ff-siamese model
-parser.add_argument("--ff_hidden_dim", type=int, default=64)
+parser.add_argument("--ff_hidden_dim", type=int, default=512)
 parser.add_argument("--scheduler", type=str, choices=["step-lr", "reduce-on-plateau"], default="step-lr")
 parser.add_argument("--scheduler_step_size", type=int, default=1)
 parser.add_argument("--scheduler_factor", type=float, default=0.60)
@@ -54,13 +54,13 @@ parser.add_argument(
     choices=["ff-siamese"],
     default="ff-siamese",
 )
-parser.add_argument("--learning_rate", type=float, default=1e-4)
+parser.add_argument("--learning_rate", type=float, default=0.0001)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
 parser.add_argument("--seed", type=seed, default="random")
 
 
 args = parser.parse_args()
-
+#args.seed = 1486
 
 def return_unk():
     return 0
@@ -86,9 +86,14 @@ def get_appropriate_dataset(data, split_name):
 
     returns a tensor dataset
     '''
+    #Drop 0.5 labels
+    #data = data[data["label"]!=0.5]
+
+
     #Convert file id strings to encoded numbers and return as tensors
     le = preprocessing.LabelEncoder()
-    le.fit(data["id1"])
+    concat_data = list(set(list(data["id1"]) + list(data["id2"])))
+    le.fit(concat_data)
     np.save('file_id_to_numbers_%s.npy'%(split_name), le.classes_)
     all_id1 = torch.as_tensor(le.transform(data["id1"]))
     all_id2 = torch.as_tensor(le.transform(data["id2"]))
@@ -96,6 +101,8 @@ def get_appropriate_dataset(data, split_name):
     all_features1 = torch.tensor(data["features1"], dtype=torch.float)
     all_features2 = torch.tensor(data["features2"], dtype=torch.float)
     all_label = torch.tensor(data["label"], dtype=torch.float)
+
+    #print(all_label)
 
     #To get back to ids
     #file_ids = get_file_id_from_number(all_id1, "train")
@@ -119,13 +126,14 @@ def get_appropriate_dataset(data, split_name):
 def set_up_data_loader():
     #Update filename
     filename = ""
+    
     if args.dataset=="saloni-only":
-        filename = os.path.join(DATA_DIR,"task2_ranking_dataset.pkl")
-
+        filename = os.path.join(DATA_DIR,"task2_ranking_all_dataset.pkl")
+        
     with open(filename, "rb") as handle:
         data = pickle.load(handle)
 
-    train, dev, test = np.split(data.sample(frac=1, random_state=42), [int((1.0 - (TEST_SPLIT+DEV_SPLIT))*len(data)), int((1.0 - TEST_SPLIT)*len(data))])
+    train, dev, test = data["train"], data["dev"], data["test"]
     
     train = train.reset_index()
     test = test.reset_index()
@@ -186,6 +194,8 @@ def set_random_seed(seed: int):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+    return
+
 def prep_for_training(num_train_optimization_steps: int):
 
     if args.model == "ff-siamese":
@@ -219,7 +229,7 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
         )
         
         loss_function = MSELoss()
-        loss = loss_function(outputs, labels)
+        loss = loss_function(outputs.flatten(), labels.flatten())
 
         if args.gradient_accumulation_step > 1:
             loss = loss / args.gradient_accumulation_step
@@ -238,7 +248,7 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
                 scheduler.step(tr_loss)
             optimizer.zero_grad()
 
-    return tr_loss / num_tr_steps
+    return (tr_loss / num_tr_steps)
 
 
 def eval_epoch(model: nn.Module, dev_dataloader: DataLoader, optimizer):
@@ -256,7 +266,7 @@ def eval_epoch(model: nn.Module, dev_dataloader: DataLoader, optimizer):
             )
             
             loss_function = MSELoss()
-            loss = loss_function(outputs, labels)
+            loss = loss_function(outputs.flatten(), labels.flatten())
 
             if args.gradient_accumulation_step > 1:
                 loss = loss / args.gradient_accumulation_step
@@ -301,9 +311,9 @@ def test_score_model(model: nn.Module, test_dataloader: DataLoader, use_zero=Fal
 
     preds, y_test = test_epoch(model, test_dataloader)
     
-    n = len(preds)
-    for i in range(0,n):
-        print(preds[i], y_test[i])
+    #n = len(preds)
+    #for i in range(0,n):
+    #    print(preds[i], y_test[i])
 
     #non_zeros = np.array(
     #    [i for i, e in enumerate(y_test) if e != 0 or use_zero])
@@ -324,6 +334,17 @@ def test_score_model(model: nn.Module, test_dataloader: DataLoader, use_zero=Fal
     return mae, corr
 
 
+def show_predictions(model: nn.Module, test_dataloader: DataLoader, use_zero=False):
+
+    preds, y_test = test_epoch(model, test_dataloader)
+    
+    n = len(preds)
+    for i in range(0,n):
+        print(preds[i], y_test[i])
+
+    return preds, y_test
+
+
 def train(
     model,
     train_dataloader,
@@ -336,7 +357,15 @@ def train(
     test_maes = []
 
     for epoch_i in range(int(args.n_epochs)):
+        #print("Before")
+        #for param in model.parameters():
+        #    print(param)
+        #print("================")
         train_loss = train_epoch(model, train_dataloader, optimizer, scheduler)
+        #print("After")
+        #for param in model.parameters():
+        #    print(param)
+        #print("=============")
         valid_loss = eval_epoch(model, validation_dataloader, optimizer)
         test_mae, test_corr = test_score_model(
             model, test_data_loader
@@ -364,6 +393,9 @@ def train(
             )
         )
 
+        show_predictions(model, test_data_loader)
+        return
+
 
 def main():
     wandb.init(project="finger_tap_dev")
@@ -388,6 +420,8 @@ def main():
         optimizer,
         scheduler,
     )
+
+    return
 
 
 if __name__ == "__main__":

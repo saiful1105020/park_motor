@@ -15,12 +15,18 @@ class FeedForwardSiamese(torch.nn.Module):
         self.linear2 = torch.nn.Linear(args.ff_hidden_dim, 1)
         self.relu = ReLU()
         self.sigmoid = Sigmoid()
-        self.ff = torch.nn.Sequential(
+        self.ff2 = torch.nn.Sequential(
             torch.nn.Linear(INPUT_DIM, args.ff_hidden_dim),
             ReLU(),
-            torch.nn.Linear(args.ff_hidden_dim, 32),
+            torch.nn.Linear(args.ff_hidden_dim, 256),
             ReLU(),
-            torch.nn.Linear(32, 1),
+            torch.nn.Linear(256, 1),
+            ReLU()
+        )
+        self.ff1 = torch.nn.Sequential(
+            torch.nn.Linear(INPUT_DIM, args.ff_hidden_dim),
+            ReLU(),
+            torch.nn.Linear(args.ff_hidden_dim, 1),
             ReLU()
         )
 
@@ -44,8 +50,8 @@ class FeedForwardSiamese(torch.nn.Module):
         y_pred = self.sigmoid(x1l2-x2l2)
         '''
         
-        x1 = self.ff(x1)
-        x2 = self.ff(x2)
+        x1 = self.ff2(x1)
+        x2 = self.ff2(x2)
 
         y_pred = self.sigmoid(x1-x2)
         return y_pred

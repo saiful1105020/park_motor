@@ -38,24 +38,24 @@ from global_configs import DATA_DIR, DEV_SPLIT, TEST_SPLIT, DEVICE
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str,
                     choices=["saloni-only"], default="saloni-only")
-parser.add_argument("--train_batch_size", type=int, default=64)
+parser.add_argument("--train_batch_size", type=int, default=32)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
-parser.add_argument("--n_epochs", type=int, default=50)
+parser.add_argument("--n_epochs", type=int, default=20)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
-parser.add_argument("--margin", type=float, default=0.3)
+parser.add_argument("--margin", type=float, default=1.0)
 #Number of output neurons in hidden layer for the ff-siamese model
 parser.add_argument("--ff_hidden_dim", type=int, default=64)
 parser.add_argument("--scheduler", type=str, choices=["step-lr", "reduce-on-plateau"], default="step-lr")
 parser.add_argument("--scheduler_step_size", type=int, default=1)
-parser.add_argument("--scheduler_factor", type=float, default=0.80)
+parser.add_argument("--scheduler_factor", type=float, default=0.95)
 parser.add_argument(
     "--model",
     type=str,
     choices=["ff-siamese"],
     default="ff-siamese",
 )
-parser.add_argument("--learning_rate", type=float, default=0.00001)
+parser.add_argument("--learning_rate", type=float, default=0.01)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
 parser.add_argument("--seed", type=seed, default="random")
 
@@ -94,6 +94,14 @@ def get_appropriate_dataset(data, split_name):
     #x1<x2: label 0->-1; x1=x2: label 0.5->0; x1>x2: label 1->1
     data['label'] = -1.0 + 2.0*data['label']
 
+    print(split_name)
+    print("===="*5)
+    print("Label 1: ")
+    print(len(data[data['label']==1.0]))
+    print("Label -1: ")
+    print(len(data[data['label']==-1.0]))
+    print("Label 0: ")
+    print(len(data[data['label']==0.0]))
 
     #Convert file id strings to encoded numbers and return as tensors
     le = preprocessing.LabelEncoder()
@@ -262,6 +270,7 @@ def train_epoch(model: nn.Module, train_dataloader: DataLoader, optimizer, sched
             features2
         )
         
+
         #Compute Loss
         loss = rankingLoss(y1_preds, y2_preds, labels)
         #loss_function = MSELoss()
@@ -335,7 +344,7 @@ def test_epoch(model: nn.Module, test_dataloader: DataLoader):
             outputs = y_preds
             outputs[torch.where(torch.abs(y_preds)<args.margin)] = 0.0
             outputs[torch.where(y_preds>args.margin)] = 1.0
-            outputs[torch.where(y_preds<args.margin)] = -1.0
+            outputs[torch.where(y_preds<-args.margin)] = -1.0
 
             outputs = outputs.detach().cpu().numpy()
             label_ids = label_ids.detach().cpu().numpy()
@@ -400,6 +409,16 @@ def train(
 ):
     valid_losses = []
     test_maes = []
+    test_corrs = []
+
+    best_valid_loss = float('inf')
+    best_model = model
+    best_epoch = 0
+
+    #Print Initial Weights of the model
+    print("Initial Weights")
+    for param in model.parameters():
+        print(param.data)
 
     for epoch_i in range(int(args.n_epochs)):
         #print("Before")
@@ -412,18 +431,33 @@ def train(
         #    print(param)
         #print("=============")
         valid_loss = eval_epoch(model, validation_dataloader, optimizer)
+        
+        if valid_loss<best_valid_loss:
+            best_valid_loss = valid_loss
+            best_epoch = epoch_i
+            best_model = model
+
         test_mae, test_corr = test_score_model(
             model, test_data_loader
         )
 
+        train_mae, train_corr = test_score_model(
+            model, train_dataloader
+        )
+
+        dev_mae, dev_corr = test_score_model(
+            model, validation_dataloader
+        )
+
         print(
-            "epoch:{}, train_loss:{}, valid_loss:{}, test_mae:{}".format(
-                epoch_i, train_loss, valid_loss, test_mae
+            "epoch:{}, train_loss:{}, train_mae:{}, valid_loss:{}, dev_mae:{}, test_mae:{}".format(
+                epoch_i, train_loss, train_mae, valid_loss, dev_mae, test_mae
             )
         )
 
         valid_losses.append(valid_loss)
         test_maes.append(test_mae)
+        test_corrs.append(test_corr)
 
         wandb.log(
             (
@@ -432,13 +466,16 @@ def train(
                     "valid_loss": valid_loss,
                     "test_mae": test_mae,
                     "test_corr": test_corr,
-                    "best_valid_loss": min(valid_losses),
-                    "best_test_mae": max(test_maes),
+                    "train_mae": train_mae,
+                    "dev_mae": dev_mae,
+                    "best_valid_loss": best_valid_loss,
+                    "best_test_mae": test_maes[best_epoch],
+                    "best_test_corr": test_corrs[best_epoch]
                 }
             )
         )
 
-    show_predictions(model, test_data_loader)
+    show_predictions(best_model, test_data_loader)
     return
 
 

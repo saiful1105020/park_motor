@@ -38,24 +38,24 @@ from global_configs import DATA_DIR, DEV_SPLIT, TEST_SPLIT, DEVICE
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str,
                     choices=["saloni-only"], default="saloni-only")
-parser.add_argument("--train_batch_size", type=int, default=32)
+parser.add_argument("--train_batch_size", type=int, default=512)
 parser.add_argument("--dev_batch_size", type=int, default=128)
 parser.add_argument("--test_batch_size", type=int, default=128)
 parser.add_argument("--n_epochs", type=int, default=20)
 parser.add_argument("--dropout_prob", type=float, default=0.5)
-parser.add_argument("--margin", type=float, default=1.0)
+parser.add_argument("--margin", type=float, default=0.05)
 #Number of output neurons in hidden layer for the ff-siamese model
-parser.add_argument("--ff_hidden_dim", type=int, default=64)
+parser.add_argument("--ff_hidden_dim", type=int, default=128)
 parser.add_argument("--scheduler", type=str, choices=["step-lr", "reduce-on-plateau"], default="step-lr")
 parser.add_argument("--scheduler_step_size", type=int, default=1)
-parser.add_argument("--scheduler_factor", type=float, default=0.95)
+parser.add_argument("--scheduler_factor", type=float, default=0.70)
 parser.add_argument(
     "--model",
     type=str,
     choices=["ff-siamese"],
     default="ff-siamese",
 )
-parser.add_argument("--learning_rate", type=float, default=0.01)
+parser.add_argument("--learning_rate", type=float, default=0.0001)
 parser.add_argument("--gradient_accumulation_step", type=int, default=1)
 parser.add_argument("--seed", type=seed, default="random")
 

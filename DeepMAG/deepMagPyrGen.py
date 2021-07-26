@@ -50,7 +50,7 @@ layer_name = 'dense_2'
 
 data_dir = args.video
 
-model_dir = 'C:/Wasif/PDMotorFeatureExtraction/DeepMAG/model/model15.h5'
+model_dir = 'E:/Saiful/park_motor/DeepMAG/model/model15.h5'
 
 
 #%%
